@@ -23,7 +23,7 @@ import type {
 	AgentTool,
 	ThinkingLevel,
 } from "@mariozechner/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, Model, TextContent } from "@mariozechner/pi-ai";
+import type { AssistantMessage, ImageContent, Message, Model, TextContent, ThinkingContent } from "@mariozechner/pi-ai";
 import { isContextOverflow, modelsAreEqual, resetApiProviders, supportsXhigh } from "@mariozechner/pi-ai";
 import { getDocsPath } from "../config.js";
 import { theme } from "../modes/interactive/theme/theme.js";
@@ -1307,6 +1307,55 @@ export class AgentSession {
 	}
 
 	/**
+	 * Send an assistant message to the session.
+	 *
+	 * This injects a synthetic assistant message into the conversation history.
+	 * Useful for extensions that need to inject reasoning or context as if the assistant said it.
+	 *
+	 * @param content Assistant message content (string, text blocks, or text+thinking blocks)
+	 * @param options.thinking If true, content is wrapped as hidden thinking (requires thinking-capable model)
+	 */
+	async sendAssistantMessage(
+		content: string | (TextContent | ThinkingContent)[],
+		options?: { thinking?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+	): Promise<void> {
+		// Normalize content to blocks array
+		let blocks: (TextContent | ThinkingContent)[];
+
+		if (typeof content === "string") {
+			// String content becomes a single text block (or thinking block if thinking option)
+			if (options?.thinking) {
+				blocks = [{ type: "thinking", thinking: content }];
+			} else {
+				blocks = [{ type: "text", text: content }];
+			}
+		} else {
+			// Already an array of blocks
+			blocks = content;
+		}
+
+		// Create synthetic assistant message
+		const assistantMessage: AssistantMessage = {
+			role: "assistant",
+			content: blocks,
+			api: this.model?.api ?? "anthropic",
+			provider: this.model?.provider ?? "anthropic",
+			model: this.model?.id ?? "unknown",
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+
+		// Append to agent state and session
+		this.agent.state.messages.push(assistantMessage);
+		this.sessionManager.appendMessage(assistantMessage);
+
+		// Emit events for UI
+		this._emit({ type: "message_start", message: assistantMessage });
+		this._emit({ type: "message_end", message: assistantMessage });
+	}
+
+	/**
 	 * Clear all queued messages and return them.
 	 * Useful for restoring to editor when user aborts.
 	 * @returns Object with steering and followUp arrays
@@ -2144,6 +2193,15 @@ export class AgentSession {
 						runner.emitError({
 							extensionPath: "<runtime>",
 							event: "send_user_message",
+							error: err instanceof Error ? err.message : String(err),
+						});
+					});
+				},
+				sendAssistantMessage: (content, options) => {
+					this.sendAssistantMessage(content, options).catch((err) => {
+						runner.emitError({
+							extensionPath: "<runtime>",
+							event: "send_assistant_message",
 							error: err instanceof Error ? err.message : String(err),
 						});
 					});
