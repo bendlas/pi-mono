@@ -1,0 +1,1000 @@
+# Pi Context Management & LLM Query Construction Analysis
+
+## Executive Summary
+
+Pi has a **three-layer message transformation pipeline** that could serve as foundation for explicit context management and a persistent conversation graph. The session system already implements a tree structure with branching. To achieve full determinism, additional metadata (seed, temperature, hardware quirks) would need to be captured.
+
+---
+
+## Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           SESSION LAYER                                      │
+│  ~/.pi/agent/sessions/--cwd--/timestamp_uuid.jsonl                          │
+│  - JSONL with id/parentId tree structure                                    │
+│  - Supports in-place branching                                              │
+│  - Stores ALL entry types (messages, compaction, model changes, etc.)       │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼ SessionManager.buildSessionContext()
+                                    │ walks tree from leaf → root
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         AGENT MESSAGE LAYER                                  │
+│  AgentMessage[] (extended types)                                             │
+│  - user, assistant, toolResult (LLM types)                                  │
+│  - bashExecution, custom, branchSummary, compactionSummary (app types)      │
+│  - Extensible via declaration merging                                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼ convertToLlm()
+                                    │ filters and transforms app-only types
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           LLM MESSAGE LAYER                                  │
+│  Message[] (pi-ai types)                                                     │
+│  - UserMessage, AssistantMessage, ToolResultMessage                         │
+│  - Fully serializable, portable across providers                            │
+│  - Context { systemPrompt, messages, tools }                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼ transformMessages()
+                                    │ cross-provider compatibility
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         PROVIDER MESSAGE LAYER                               │
+│  Provider-specific format                                                    │
+│  - Anthropic: MessageParam[] with content blocks                            │
+│  - OpenAI: ChatCompletionMessageParam[]                                     │
+│  - Google: Content[] with parts                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Key Source Files
+
+| Layer | File | Purpose |
+|-------|------|---------|
+| Session | `packages/coding-agent/src/core/session-manager.ts` | Tree-structured persistence, context building |
+| Agent Message | `packages/coding-agent/src/core/messages.ts` | Extended message types, `convertToLlm()` |
+| Agent Loop | `packages/agent/src/agent-loop.ts` | Tool execution, event streaming |
+| Agent State | `packages/agent/src/agent.ts` | Stateful wrapper, queuing |
+| LLM Types | `packages/ai/src/types.ts` | Core message types, Context, Tool |
+| Transform | `packages/ai/src/providers/transform-messages.ts` | Cross-provider normalization |
+| Providers | `packages/ai/src/providers/*.ts` | API-specific formatting |
+
+---
+
+## Session Tree Structure
+
+### File Format (JSONL)
+
+```jsonl
+{"type":"session","version":3,"id":"uuid","timestamp":"...","cwd":"/path"}
+{"type":"message","id":"a1b2c3d4","parentId":null,"timestamp":"...","message":{...}}
+{"type":"message","id":"b2c3d4e5","parentId":"a1b2c3d4","timestamp":"...","message":{...}}
+{"type":"model_change","id":"c3d4e5f6","parentId":"b2c3d4e5","timestamp":"...","provider":"openai","modelId":"gpt-4o"}
+{"type":"message","id":"d4e5f6g7","parentId":"a1b2c3d4","timestamp":"...","message":{...}}  ← branch
+```
+
+### Entry Types
+
+```typescript
+type SessionEntry =
+  | SessionMessageEntry      // AgentMessage wrapped with id/parentId
+  | ModelChangeEntry         // provider, modelId
+  | ThinkingLevelChangeEntry // thinkingLevel
+  | CompactionEntry          // summary, firstKeptEntryId, tokensBefore
+  | BranchSummaryEntry       // fromId, summary
+  | CustomEntry              // customType, data (extension state, NOT in LLM context)
+  | CustomMessageEntry       // customType, content, display (IN LLM context)
+  | LabelEntry               // targetId, label (user bookmarks)
+  | SessionInfoEntry         // name (display name)
+```
+
+### Context Building
+
+```typescript
+// SessionManager.buildSessionContext() walks from leaf to root:
+// 1. Collect all entries on path
+// 2. Extract current model/thinking level (latest wins)
+// 3. If compaction on path:
+//    - Emit compactionSummary message first
+//    - Emit messages from firstKeptEntryId to compaction
+//    - Emit messages after compaction
+// 4. Convert branchSummary/customMessage to appropriate formats
+
+interface SessionContext {
+  messages: AgentMessage[];
+  thinkingLevel: string;
+  model: { provider: string; modelId: string } | null;
+}
+```
+
+---
+
+## Message Type Hierarchy
+
+### Base Types (pi-ai)
+
+```typescript
+// Content blocks
+interface TextContent { type: "text"; text: string; }
+interface ImageContent { type: "image"; data: string; mimeType: string; }
+interface ThinkingContent { type: "thinking"; thinking: string; thinkingSignature?: string; }
+interface ToolCall { type: "toolCall"; id: string; name: string; arguments: Record<string, any>; }
+
+// Messages
+interface UserMessage {
+  role: "user";
+  content: string | (TextContent | ImageContent)[];
+  timestamp: number;
+}
+
+interface AssistantMessage {
+  role: "assistant";
+  content: (TextContent | ThinkingContent | ToolCall)[];
+  api: Api;              // e.g., "anthropic-messages"
+  provider: Provider;    // e.g., "anthropic"
+  model: string;         // e.g., "claude-sonnet-4-20250514"
+  responseId?: string;   // Provider-specific response ID
+  usage: Usage;
+  stopReason: StopReason;
+  errorMessage?: string;
+  timestamp: number;
+}
+
+interface ToolResultMessage {
+  role: "toolResult";
+  toolCallId: string;
+  toolName: string;
+  content: (TextContent | ImageContent)[];
+  details?: any;         // Tool-specific metadata
+  isError: boolean;
+  timestamp: number;
+}
+```
+
+### Extended Types (coding-agent)
+
+```typescript
+interface BashExecutionMessage {
+  role: "bashExecution";
+  command: string;
+  output: string;
+  exitCode: number | undefined;
+  cancelled: boolean;
+  truncated: boolean;
+  fullOutputPath?: string;
+  excludeFromContext?: boolean;  // !! prefix commands
+  timestamp: number;
+}
+
+interface CustomMessage {
+  role: "custom";
+  customType: string;            // Extension identifier
+  content: string | (TextContent | ImageContent)[];
+  display: boolean;              // Show in TUI
+  details?: any;                 // Extension metadata (NOT sent to LLM)
+  timestamp: number;
+}
+
+interface BranchSummaryMessage {
+  role: "branchSummary";
+  summary: string;
+  fromId: string;
+  timestamp: number;
+}
+
+interface CompactionSummaryMessage {
+  role: "compactionSummary";
+  summary: string;
+  tokensBefore: number;
+  timestamp: number;
+}
+```
+
+---
+
+## Transformation Pipeline Detail
+
+### 1. Session → AgentMessage[]
+
+```typescript
+// buildSessionContext() in session-manager.ts
+// Walks tree, handles compaction, returns messages
+
+function buildSessionContext(entries, leafId?, byId?): SessionContext {
+  // Walk from leaf to root
+  const path = [];
+  let current = leaf;
+  while (current) {
+    path.unshift(current);
+    current = byId.get(current.parentId);
+  }
+
+  // Extract settings (latest wins)
+  for (entry of path) {
+    if (entry.type === "thinking_level_change") thinkingLevel = entry.thinkingLevel;
+    if (entry.type === "model_change") model = { provider, modelId };
+    if (entry.type === "compaction") compaction = entry;
+  }
+
+  // Build messages with compaction handling
+  if (compaction) {
+    messages.push(createCompactionSummaryMessage(...));
+    // Emit kept messages (from firstKeptEntryId)
+    // Emit messages after compaction
+  } else {
+    // Emit all messages
+  }
+
+  return { messages, thinkingLevel, model };
+}
+```
+
+### 2. AgentMessage[] → Message[] (convertToLlm)
+
+```typescript
+// convertToLlm() in messages.ts
+// Filters app-only types, transforms to LLM format
+
+function convertToLlm(messages: AgentMessage[]): Message[] {
+  return messages.map(m => {
+    switch (m.role) {
+      case "bashExecution":
+        if (m.excludeFromContext) return undefined;
+        return { role: "user", content: [{ type: "text", text: bashExecutionToText(m) }], timestamp: m.timestamp };
+      case "custom":
+        return { role: "user", content: m.content, timestamp: m.timestamp };
+      case "branchSummary":
+        return { role: "user", content: [{ type: "text", text: wrapSummary(m.summary) }], timestamp: m.timestamp };
+      case "compactionSummary":
+        return { role: "user", content: [{ type: "text", text: wrapCompaction(m.summary) }], timestamp: m.timestamp };
+      case "user":
+      case "assistant":
+      case "toolResult":
+        return m;  // Pass through unchanged
+      default:
+        return undefined;
+    }
+  }).filter(m => m !== undefined);
+}
+```
+
+### 3. Message[] → Message[] (transformMessages)
+
+```typescript
+// transformMessages() in transform-messages.ts
+// Cross-provider compatibility, handles thinking blocks
+
+function transformMessages(messages: Message[], model: Model<TApi>): Message[] {
+  const toolCallIdMap = new Map<string, string>();
+
+  return messages.map(msg => {
+    if (msg.role === "assistant") {
+      const isSameModel = msg.provider === model.provider && msg.api === model.api;
+
+      return {
+        ...msg,
+        content: msg.content.flatMap(block => {
+          if (block.type === "thinking") {
+            // Redacted thinking: only valid for same model
+            if (block.redacted && !isSameModel) return [];
+            // Cross-provider: convert to text
+            if (!isSameModel && block.thinking) {
+              return { type: "text", text: block.thinking };
+            }
+            return block;
+          }
+          if (block.type === "toolCall") {
+            // Normalize tool call IDs for API compatibility
+            // Remove provider-specific signatures for cross-provider
+          }
+          return block;
+        })
+      };
+    }
+    return msg;
+  });
+  // Also inserts synthetic tool results for orphaned tool calls
+}
+```
+
+### 4. Message[] → Provider Format
+
+Each provider file (anthropic.ts, openai-completions.ts, etc.) converts:
+- `Message[]` to provider-specific request format
+- Handles caching headers (Anthropic: cache_control, OpenAI: previous_response_id)
+- Converts tools to provider format
+
+---
+
+## Key Integration Points for Conversation Graph
+
+### Where Context is Constructed
+
+```
+Agent.prompt() / Agent.continue()
+    │
+    ▼ createContextSnapshot()
+    │
+    ▼ AgentContext { systemPrompt, messages, tools }
+    │
+    ▼ agentLoop() / agentLoopContinue()
+    │
+    ▼ streamAssistantResponse()
+    │   ├─ transformContext(messages)     // Optional pre-processing
+    │   ├─ convertToLlm(messages)         // AgentMessage → Message
+    │   └─ streamSimple(model, context)   // Calls provider
+    │
+    ▼ transformMessages() inside provider
+    │
+    ▼ Provider-specific HTTP request
+```
+
+### What's Already Captured for Determinism
+
+| Data | Where Stored | Reproducible? |
+|------|--------------|---------------|
+| Message history | SessionEntry.message | ✅ Yes |
+| Model ID | AssistantMessage.model | ✅ Yes |
+| Provider | AssistantMessage.provider | ✅ Yes |
+| API type | AssistantMessage.api | ✅ Yes |
+| Timestamp | AssistantMessage.timestamp | ✅ Yes |
+| Usage stats | AssistantMessage.usage | ✅ Yes |
+| Response ID | AssistantMessage.responseId | ⚠️ Provider-specific, may enable caching replay |
+| Thinking signatures | ThinkingContent.thinkingSignature | ⚠️ Provider-specific, enables thinking replay |
+
+### What's Missing for Full Determinism
+
+| Data | Why Needed | Where to Add |
+|------|-----------|--------------|
+| Seed | Reproducible sampling | `StreamOptions.seed` → AssistantMessage |
+| Temperature | Sampling variance | Already in `StreamOptions`, needs capture in AssistantMessage |
+| Top_p, etc. | Other sampling params | `StreamOptions` → AssistantMessage |
+| Hardware/driver | GPU non-determinism | Would need external capture |
+| Model weights hash | Model version tracking | Would need model registry |
+| Provider request ID | Full request tracing | Could capture from API response |
+
+---
+
+## Proposed Extension Points for Explicit Context Management
+
+### 1. Conversation Graph Layer (NEW)
+
+```typescript
+// Could be implemented as extension or core package
+
+interface ConversationNode {
+  id: string;
+  parentId: string | null;
+  entry: SessionEntry;           // Raw session entry
+  llmContext?: Context;          // Computed LLM context at this point
+  requestPayload?: unknown;      // Captured via onPayload
+  responseMetadata?: {           // Captured from response
+    responseId?: string;
+    modelVersion?: string;
+    seed?: number;
+    temperature?: number;
+    // ... other sampling params
+  };
+  children: string[];            // Branch points
+  branchLabel?: string;          // User-defined label
+}
+
+interface ConversationGraph {
+  nodes: Map<string, ConversationNode>;
+  rootId: string | null;
+  leafId: string | null;
+
+  // Navigation
+  getBranch(fromId?: string): ConversationNode[];
+  getChildren(parentId: string): ConversationNode[];
+  getMergePoint(branchId: string): string | null;
+
+  // Modification
+  insertNode(parentId: string, entry: SessionEntry): string;
+  deleteNode(id: string): void;  // Mark as deleted, preserve graph
+  mergeBranches(sourceId: string, targetId: string): void;
+
+  // Context computation
+  computeContext(leafId: string): Context;
+  computeDiff(fromId: string, toId: string): ContextDiff;
+
+  // Serialization
+  serialize(): string;
+  static deserialize(data: string): ConversationGraph;
+}
+```
+
+### 2. Request Capture Hook
+
+```typescript
+// In AgentOptions or extension
+onPayload: (payload: unknown, model: Model) => {
+  // Capture full request for reproducibility
+  conversationGraph.captureRequest(currentNodeId, payload, model);
+}
+```
+
+### 3. Response Metadata Capture
+
+```typescript
+// Extend AssistantMessage or add parallel tracking
+interface ResponseMetadata {
+  requestId: string;           // Provider request ID
+  seed?: number;               // If provider supports
+  temperature?: number;
+  modelVersion?: string;       // If available
+  latencyMs: number;
+}
+```
+
+### 4. Alternative Path Recording
+
+```typescript
+// When branching, record the "what if"
+interface BranchPoint {
+  id: string;
+  fromNodeId: string;
+  branchReason: "user-branch" | "alternative-response" | "retry";
+  alternativeContext?: Context;  // What was different
+  timestamp: number;
+}
+
+// Track merge points where branches converge
+interface MergePoint {
+  id: string;
+  branchIds: string[];
+  mergedContext: Context;
+  timestamp: number;
+}
+```
+
+---
+
+## Implementation Strategy
+
+### Phase 1: Observation Layer (Non-invasive)
+
+1. **Extension that captures all requests/responses**
+   - Use `onPayload` callback to capture provider requests
+   - Hook into `Agent.subscribe()` to capture all events
+   - Build parallel graph structure without modifying core
+
+2. **Session analysis tools**
+   - Parse existing JSONL sessions
+   - Build in-memory graph
+   - Visualize branching structure
+
+### Phase 2: Metadata Enhancement (Minor core changes)
+
+1. **Extend AssistantMessage with reproducibility metadata**
+   ```typescript
+   interface AssistantMessage {
+     // ... existing fields
+     reproducibility?: {
+       seed?: number;
+       temperature?: number;
+       topP?: number;
+       requestHash?: string;  // Hash of full request payload
+     };
+   }
+   ```
+
+2. **Capture seed in stream options**
+   - Pass through `StreamOptions.seed` to providers that support it
+   - Store in AssistantMessage
+
+### Phase 3: Graph API (New package/extension)
+
+1. **ConversationGraph class**
+   - Manage in-memory graph structure
+   - Provide context computation with caching
+   - Support serialization/deserialization
+
+2. **Graph manipulation tools**
+   - Branch, merge, delete operations
+   - Context diff computation
+   - "What if" analysis
+
+### Phase 4: Deterministic Replay
+
+1. **Replay engine**
+   - Reconstruct exact Context from graph
+   - Rebuild provider payload
+   - Compare responses for debugging
+
+2. **Divergence detection**
+   - Track where conversation paths differ
+   - Identify causes of different responses
+
+---
+
+## Current Limitations
+
+1. **No seed capture** - Providers that support seeds (OpenAI, etc.) don't have seed passed through
+2. **Temperature not stored** - Passes through options but not captured in message
+3. **Provider-specific signatures** - Thinking signatures are opaque, may not survive provider version changes
+4. **Hardware non-determinism** - Even with same seed, GPU execution varies
+5. **Model version drift** - Providers update models without version bumps
+
+---
+
+## Conclusion
+
+Pi's architecture is **well-suited** for explicit context management:
+
+1. **Session layer already implements a tree structure** - Branching is native
+2. **Transformation pipeline is well-factored** - Clear hooks at each layer
+3. **Messages are fully serializable** - JSON-compatible throughout
+4. **Provider abstraction exists** - Cross-provider handoff already works
+
+To achieve full determinism, the main gaps are:
+1. Capturing sampling parameters (seed, temperature)
+2. Storing request payloads
+3. External factors (hardware, model versions)
+
+These can be addressed incrementally without major architectural changes. The most valuable first step would be an **observation layer extension** that builds a parallel conversation graph from existing events, demonstrating the concept before any core modifications.
+
+---
+
+## File Paths for Reference
+
+```
+packages/ai/src/types.ts                           # Core message types
+packages/ai/src/providers/transform-messages.ts    # Cross-provider transform
+packages/ai/src/providers/*.ts                     # Provider implementations
+
+packages/agent/src/types.ts                        # AgentMessage, AgentContext
+packages/agent/src/agent-loop.ts                   # Main loop, tool execution
+packages/agent/src/agent.ts                        # Stateful Agent class
+
+packages/coding-agent/src/core/session-manager.ts  # Session persistence
+packages/coding-agent/src/core/messages.ts         # Extended types, convertToLlm
+packages/coding-agent/src/core/sdk.ts              # SDK entry point
+packages/coding-agent/docs/session.md              # Session format docs
+```
+
+---
+
+## Extension Plan: Message Structure Visualizer
+
+### Overview
+
+A TUI extension that renders the complete message transformation pipeline with full metadata visibility. This serves as both a debugging tool and a foundation for understanding context construction.
+
+### Goals
+
+1. **Visualize every layer** - Session entry → AgentMessage → Message → Provider format
+2. **Show all metadata** - Role, timestamp, provider, model, usage, signatures, etc.
+3. **Enable inspection** - Drill down into content blocks, tool calls, thinking
+4. **Track transformations** - See how messages change across the pipeline
+
+---
+
+### UI Design
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Message Visualizer                                           [q] close   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  Layer: [Session] [Agent] [LLM] [Provider]     View: [Tree] [List] [JSON]  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─ Session Entry ───────────────────────────────────────────────────────┐  │
+│  │ type: "message"          id: "a1b2c3d4"                               │  │
+│  │ parentId: null           timestamp: 2024-01-15 14:32:01.234          │  │
+│  │                                                                         │  │
+│  │ message:                                                                │  │
+│  │   role: "user"                                                         │  │
+│  │   content:                                                              │  │
+│  │     [0] type: "text"                                                   │  │
+│  │         text: "Read the README.md file..."                            │  │
+│  │     [1] type: "image"                                                  │  │
+│  │         mimeType: "image/png"                                          │  │
+│  │         data: "iVBORw0KGgoAAAANSUhEUgAAA..." (2.3 KB)                  │  │
+│  └────────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+│  ┌─ Transformed to LLM Message ──────────────────────────────────────────┐  │
+│  │ role: "user"              timestamp: 1705329121234                    │  │
+│  │ content:                                                                │  │
+│  │   [0] type: "text" text: "Read the README.md file..."                 │  │
+│  │   [1] type: "image" mimeType: "image/png" data: "..." (2.3 KB)        │  │
+│  └────────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+│  ┌─ Provider Payload (anthropic-messages) ───────────────────────────────┐  │
+│  │ {                                                                       │  │
+│  │   "role": "user",                                                     │  │
+│  │   "content": [                                                        │  │
+│  │     { "type": "text", "text": "Read the README.md file..." },        │  │
+│  │     { "type": "image", "source": { "type": "base64", ... } }        │  │
+│  │   ]                                                                     │  │
+│  │ }                                                                       │  │
+│  └────────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  [↑↓] navigate  [Enter] expand  [Tab] next layer  [j] JSON  [c] copy       │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Detailed View Modes
+
+#### 1. Tree View (default)
+
+Shows message hierarchy with expandable nodes:
+
+```
+▼ Entry #1 (a1b2c3d4) [message]
+  ├── type: "message"
+  ├── id: "a1b2c3d4"
+  ├── parentId: null
+  ├── timestamp: 2024-01-15 14:32:01.234
+  └── ▼ message
+        ├── role: "user"
+        └── ▼ content [2 items]
+              ├── [0] text: "Read the README.md file..."
+              └── [1] image (image/png, 2.3 KB)
+
+▼ Entry #2 (b2c3d4e5) [message]
+  ├── type: "message"
+  ├── id: "b2c3d4e5"
+  ├── parentId: "a1b2c3d4"
+  └── ▼ message
+        ├── role: "assistant"
+        ├── api: "anthropic-messages"
+        ├── provider: "anthropic"
+        ├── model: "claude-sonnet-4-20250514"
+        ├── responseId: "msg_01XYZ..."
+        ├── ▼ usage
+        │     ├── input: 1234
+        │     ├── output: 567
+        │     ├── cacheRead: 0
+        │     ├── cacheWrite: 1000
+        │     └── totalTokens: 1801
+        ├── stopReason: "end_turn"
+        ├── timestamp: 1705329125678
+        └── ▼ content [3 items]
+              ├── [0] ▼ thinking
+              │     ├── thinking: "Let me analyze this..."
+              │     └── thinkingSignature: "EqeBxY8u..."
+              ├── [1] text: "I'll read that file for you."
+              └── [2] ▼ toolCall
+                    ├── id: "toolu_01ABC..."
+                    ├── name: "Read"
+                    └── ▼ arguments
+                          ├── path: "README.md"
+                          └── limit: 100
+```
+
+#### 2. List View
+
+Flat list of messages with inline metadata:
+
+```
+[#1] user          14:32:01   "Read the README.md file..." + 1 image
+[#2] assistant     14:32:05   claude-sonnet-4  1.8k tokens  end_turn
+     └─ thinking (234 tokens) + toolCall: Read
+[#3] toolResult    14:32:06   Read → "# Project Name\n\n..."
+[#4] assistant     14:32:08   claude-sonnet-4  3.2k tokens  end_turn
+     └─ text: "Here's what I found..."
+```
+
+#### 3. JSON View
+
+Raw JSON with syntax highlighting:
+
+```json
+{
+  "type": "message",
+  "id": "a1b2c3d4",
+  "parentId": null,
+  "timestamp": "2024-01-15T14:32:01.234Z",
+  "message": {
+    "role": "user",
+    "content": [
+      { "type": "text", "text": "Read the README.md file..." }
+    ]
+  }
+}
+```
+
+---
+
+### Metadata Panels
+
+#### User Message
+
+```
+┌─ User Message ──────────────────────────────────────────────┐
+│ role: "user"                                                │
+│ timestamp: 2024-01-15 14:32:01.234                         │
+│ content:                                                    │
+│   [0] type: text, length: 23 chars                         │
+│   [1] type: image, mime: image/png, size: 2.3 KB           │
+│                                                             │
+│ Session Entry ID: a1b2c3d4                                 │
+│ Parent Entry ID: null                                      │
+│ Branch: main                                                │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### Assistant Message
+
+```
+┌─ Assistant Message ─────────────────────────────────────────┐
+│ role: "assistant"                                           │
+│ timestamp: 2024-01-15 14:32:05.678                         │
+│                                                             │
+│ ┌─ Model Info ────────────────────────────────────────────┐ │
+│ │ provider: "anthropic"      api: "anthropic-messages"    │ │
+│ │ model: "claude-sonnet-4-20250514"                        │ │
+│ │ responseId: "msg_01XYZ123ABC..."                         │ │
+│ └──────────────────────────────────────────────────────────┘ │
+│                                                             │
+│ ┌─ Usage ─────────────────────────────────────────────────┐ │
+│ │ input: 1,234     output: 567     total: 1,801 tokens    │ │
+│ │ cacheRead: 0     cacheWrite: 1,000                      │ │
+│ │ cost: $0.0234                                           │ │
+│ └──────────────────────────────────────────────────────────┘ │
+│                                                             │
+│ ┌─ Content Blocks ────────────────────────────────────────┐ │
+│ │ [0] thinking   234 tokens  signature: EqeBxY8u...       │ │
+│ │ [1] text       89 tokens   "I'll read that file..."    │ │
+│ │ [2] toolCall   id: toolu_01ABC  name: Read              │ │
+│ │      arguments: { path: "README.md", limit: 100 }       │ │
+│ └──────────────────────────────────────────────────────────┘ │
+│                                                             │
+│ stopReason: "end_turn"                                      │
+│ Session Entry ID: b2c3d4e5                                 │
+│ Parent Entry ID: a1b2c3d4                                  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### Tool Result Message
+
+```
+┌─ Tool Result ───────────────────────────────────────────────┐
+│ role: "toolResult"                                          │
+│ timestamp: 2024-01-15 14:32:06.123                         │
+│ toolCallId: "toolu_01ABC..."                                │
+│ toolName: "Read"                                            │
+│ isError: false                                              │
+│                                                             │
+│ ┌─ Content ───────────────────────────────────────────────┐ │
+│ │ [0] text, 15,234 chars (truncated in view)              │ │
+│ │     "# Project Name\n\n## Overview\n..."                │ │
+│ └──────────────────────────────────────────────────────────┘ │
+│                                                             │
+│ ┌─ Details ───────────────────────────────────────────────┐ │
+│ │ path: "README.md"                                        │ │
+│ │ bytes: 15,234                                            │ │
+│ │ lines: 342                                               │ │
+│ └──────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### Bash Execution Message
+
+```
+┌─ Bash Execution ────────────────────────────────────────────┐
+│ role: "bashExecution"                                       │
+│ timestamp: 2024-01-15 14:32:10.456                         │
+│ excludeFromContext: false                                   │
+│                                                             │
+│ command: "npm run check"                                    │
+│ exitCode: 0                                                 │
+│ cancelled: false                                            │
+│ truncated: false                                            │
+│                                                             │
+│ ┌─ Output ────────────────────────────────────────────────┐ │
+│ │ > npm run check                                          │ │
+│ │                                                          │ │
+│ │ > pi-mono@0.0.1 check                                   │ │
+│ │ > tsc --noEmit && biome check .                         │ │
+│ │                                                          │ │
+│ │ (23 lines, 1,234 chars)                                 │ │
+│ └──────────────────────────────────────────────────────────┘ │
+│                                                             │
+│ Transformed to LLM as user message:                         │
+│   "Ran `npm run check`\n```\n...\n```"                      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### Layer Comparison View
+
+Shows how a message transforms across layers:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Layer Comparison: Entry #2 (b2c3d4e5)                         [Esc] back   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─ Session Entry ─────────────┐  ┌─ AgentMessage ─────────────────────────┐ │
+│  │ type: "message"             │  │ role: "assistant"                      │ │
+│  │ id: "b2c3d4e5"              │  │ api: "anthropic-messages"              │ │
+│  │ parentId: "a1b2c3d4"        │  │ provider: "anthropic"                  │ │
+│  │ timestamp: "..."            │  │ model: "claude-sonnet-4-20250514"      │ │
+│  │                              │  │ usage: { input: 1234, ... }            │ │
+│  │ message: { ... }            │  │ stopReason: "end_turn"                 │ │
+│  │   role: "assistant"         │  │ timestamp: 1705329125678               │ │
+│  │   api: "anthropic-messages" │  │ content: [ ... ]                       │ │
+│  │   ...                       │  │                                        │ │
+│  └──────────────────────────────┘  └────────────────────────────────────────┘ │
+│                                                                             │
+│  ┌─ LLM Message ─────────────────────────────────────────────────────────┐  │
+│  │ role: "assistant"                                                      │  │
+│  │ content: [ thinking (converted to text for cross-provider), text, ... ] │  │
+│  │ (Same as AgentMessage for same provider, transformed for cross-provider) │  │
+│  └────────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+│  ┌─ Provider Payload (anthropic-messages) ───────────────────────────────┐  │
+│  │ { "role": "assistant", "content": [ ... ], "cache_control": ... }    │  │
+│  │ (Full API request format with provider-specific fields)               │  │
+│  └────────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  Differences: thinkingSignature preserved, cache_control added              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### Implementation
+
+#### Extension Structure
+
+```
+packages/coding-agent/extensions/message-visualizer/
+├── extension.ts              # Entry point, registers commands
+├── visualizer.ts             # Core visualization logic
+├── components/
+│   ├── tree-view.ts          # Hierarchical view component
+│   ├── list-view.ts          # Flat list view component
+│   ├── json-view.ts          # Raw JSON view component
+│   ├── layer-comparison.ts   # Side-by-side layer comparison
+│   └── metadata-panel.ts     # Metadata detail panels
+├── types.ts                  # Extension-specific types
+└── SKILL.md                  # Extension documentation
+```
+
+#### Key APIs Used
+
+```typescript
+// Access session manager
+const sessionManager = context.sessionManager;
+const entries = sessionManager.loadSession(sessionId);
+
+// Access conversion functions
+import { convertToLlm } from "@mariozechner/pi-coding-agent";
+import { transformMessages } from "@mariozechner/pi-ai/providers";
+
+// Access current agent state
+const state = context.agent.state;
+const messages = state.messages;
+
+// Subscribe to events for live updates
+context.agent.subscribe((event, signal) => {
+  if (event.type === "message_end") {
+    visualizer.refresh();
+  }
+});
+
+// Capture provider payloads
+const sdk = context.sdk;
+sdk.onPayload = (payload, model) => {
+  visualizer.capturePayload(payload, model);
+};
+```
+
+#### Commands
+
+| Command | Description |
+|---------|-------------|
+| `message-visualizer:open` | Open visualizer for current session |
+| `message-visualizer:entry` | View specific entry by ID |
+| `message-visualizer:compare` | Compare layers for selected message |
+| `message-visualizer:export` | Export session as JSON |
+| `message-visualizer:diff` | Compare two sessions/branches |
+
+#### TUI Integration
+
+```typescript
+// Register as panel that can be opened
+tui.registerPanel({
+  id: "message-visualizer",
+  title: "Message Visualizer",
+  component: MessageVisualizerPanel,
+  keybinding: "ctrl+shift+m",
+});
+
+// Or as modal overlay
+tui.showModal(MessageVisualizerModal, {
+  sessionEntries: entries,
+  currentEntryId: currentId,
+});
+```
+
+---
+
+### Data Flow for Visualization
+
+```
+Session File (JSONL)
+    │
+    ▼ SessionManager.loadSession()
+    │
+SessionEntry[]
+    │
+    ├─── Direct rendering (Session Layer view)
+    │
+    ▼ SessionManager.buildSessionContext()
+    │
+AgentMessage[]
+    │
+    ├─── Direct rendering (Agent Layer view)
+    │
+    ▼ convertToLlm()
+    │
+Message[]
+    │
+    ├─── Direct rendering (LLM Layer view)
+    │
+    ▼ transformMessages(model)
+    │
+Message[] (normalized)
+    │
+    ▼ Provider-specific conversion
+    │
+ProviderFormat[]
+    │
+    └─── Direct rendering (Provider Layer view)
+```
+
+---
+
+### Features
+
+#### 1. Session Browser
+- List all sessions in `~/.pi/agent/sessions/`
+- Show session metadata (cwd, start time, model)
+- Load and visualize any session
+
+#### 2. Branch Navigation
+- Show tree structure of session entries
+- Navigate between branches
+- Highlight current branch
+- Show merge points
+
+#### 3. Content Inspection
+- Expand/collapse content blocks
+- View images inline (for supported terminals)
+- Copy content to clipboard
+- View truncated output files
+
+#### 4. Metadata Summary
+- Token usage over time
+- Model changes
+- Thinking level changes
+- Compaction events
+
+#### 5. Export & Analysis
+- Export to JSON/Markdown
+- Generate conversation report
+- Compute statistics (turn counts, token totals, etc.)
+
+---
+
+### Future Enhancements
+
+1. **Diff View** - Compare two messages or sessions
+2. **Search** - Find messages by content, tool name, etc.
+3. **Filtering** - Show only specific roles, tools, time range
+4. **Analytics** - Charts for token usage, response times
+5. **Replay Mode** - Step through conversation turn by turn
+```
