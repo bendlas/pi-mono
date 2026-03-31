@@ -1,5 +1,158 @@
 # Pi Context Management & LLM Query Construction Analysis
 
+## Action Plan
+
+### Priority Order
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  ACTION ROADMAP                                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  IMMEDIATE (No core changes, proof of concept)                              │
+│  ────────────────────────────────────────                                   │
+│  [1] Build session parser utility                                           │
+│      └─ Parse JSONL → in-memory graph structure                             │
+│      └─ Extract entry types, build parent/child relationships               │
+│      └─ Deliverable: SessionGraph class with navigation methods             │
+│                                                                              │
+│  [2] Implement read-only visualizer prototype                               │
+│      └─ Depends on: [1]                                                     │
+│      └─ Tree view of session entries with metadata                          │
+│      └─ Layer comparison (Session → AgentMessage → Message)                 │
+│      └─ Deliverable: CLI tool or simple TUI                                 │
+│                                                                              │
+│  [3] Add provider payload capture                                           │
+│      └─ Hook into onPayload for request capture                             │
+│      └─ Store payloads alongside session entries                            │
+│      └─ Deliverable: Enhanced session data with full request trace          │
+│                                                                              │
+│  ────────────────────────────────────────────────────────────────────────   │
+│                                                                              │
+│  SHORT-TERM (Minor enhancements, still non-invasive)                        │
+│  ─────────────────────────────────────────────                              │
+│  [4] Implement layer transformation visualization                           │
+│      └─ Depends on: [2]                                                     │
+│      └─ Show convertToLlm() output side-by-side                             │
+│      └─ Show transformMessages() output for different providers             │
+│      └─ Deliverable: Diff view for layer comparison                         │
+│                                                                              │
+│  [5] Add branch visualization                                               │
+│      └─ Depends on: [1], [2]                                                │
+│      └─ Render tree structure with branch points                            │
+│      └─ Navigate between branches                                           │
+│      └─ Deliverable: Branch tree component                                  │
+│                                                                              │
+│  [6] Build context reconstruction tool                                      │
+│      └─ Depends on: [1], [3]                                                │
+│      └─ Given any entry ID, reconstruct full Context                        │
+│      └─ Show what the LLM saw at that point                                 │
+│      └─ Deliverable: ContextInspector class                                 │
+│                                                                              │
+│  ────────────────────────────────────────────────────────────────────────   │
+│                                                                              │
+│  MEDIUM-TERM (Core metadata enhancements)                                   │
+│  ─────────────────────────────────────────                                  │
+│  [7] Add reproducibility metadata to AssistantMessage                       │
+│      └─ Add seed, temperature, topP to message type                         │
+│      └─ Capture in stream response                                          │
+│      └─ Deliverable: Extended AssistantMessage type                         │
+│                                                                              │
+│  [8] Pass seed through StreamOptions                                        │
+│      └─ Depends on: [7]                                                     │
+│      └─ Add seed parameter to providers that support it                     │
+│      └─ Store seed in assistant message                                     │
+│      └─ Deliverable: Reproducible sampling support                          │
+│                                                                              │
+│  [9] Implement request hash                                                 │
+│      └─ Depends on: [3], [7]                                                │
+│      └─ Hash full request payload                                           │
+│      └─ Store hash for replay verification                                  │
+│      └─ Deliverable: Request fingerprinting                                 │
+│                                                                              │
+│  ────────────────────────────────────────────────────────────────────────   │
+│                                                                              │
+│  LONG-TERM (Full conversation graph system)                                 │
+│  ─────────────────────────────────────────                                  │
+│  [10] Design ConversationGraph API                                          │
+│       └─ Depends on: [1-9]                                                  │
+│       └─ Formalize node types, operations                                   │
+│       └─ Design merge/branch/delete semantics                               │
+│       └─ Deliverable: ConversationGraph interface spec                      │
+│                                                                              │
+│  [11] Implement graph manipulation                                          │
+│       └─ Depends on: [10]                                                   │
+│       └─ Branch from any node                                               │
+│       └─ Merge branches with conflict detection                             │
+│       └─ Delete nodes (mark as deleted, preserve graph)                     │
+│       └─ Deliverable: Graph mutation API                                    │
+│                                                                              │
+│  [12] Build replay engine                                                   │
+│       └─ Depends on: [7-11]                                                 │
+│       └─ Reconstruct exact Context from any point                           │
+│       └─ Rebuild provider payload                                           │
+│       └─ Compare responses for divergence detection                         │
+│       └─ Deliverable: ReplayEngine class                                    │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Dependency Graph
+
+```
+                    [1] Session Parser
+                         │
+          ┌──────────────┼──────────────┐
+          ▼              ▼              ▼
+      [2] Visualizer  [5] Branch    [6] Context
+          │              View         Inspector
+          │              │              │
+          ▼              │              │
+      [4] Layer          │              │
+       Transform◄────────┘              │
+          │                             │
+          └──────────────┬──────────────┘
+                         │
+      [3] Payload Capture
+                         │
+          ┌──────────────┼──────────────┐
+          ▼              ▼              ▼
+      [7] Metadata   [9] Request     [10] Graph
+        Enhance       Hash            Design
+          │              │              │
+          ▼              │              │
+      [8] Seed Pass◄────┘              │
+          │                             │
+          └──────────────┬──────────────┘
+                         │
+                         ▼
+                  [11] Graph Manipulation
+                         │
+                         ▼
+                  [12] Replay Engine
+```
+
+### Decision Points
+
+| Checkpoint | Question | Go/No-Go Criteria |
+|------------|----------|-------------------|
+| After [2] | Is visualization useful enough to continue? | User feedback positive, performance acceptable |
+| After [3] | Can we capture enough for reproducibility? | Payloads are complete, no missing data |
+| After [6] | Does context reconstruction work reliably? | Matches actual LLM calls 100% |
+| After [8] | Do seeds work across providers? | OpenAI, Anthropic, Google tested |
+| After [10] | Is the API design sound? | Stakeholder approval, use cases covered |
+
+### Effort Estimates
+
+| Phase | Actions | Estimated Effort | Risk Level |
+|-------|---------|------------------|------------|
+| Immediate | 1-3 | 2-3 days | Low |
+| Short-term | 4-6 | 3-5 days | Low-Medium |
+| Medium-term | 7-9 | 5-7 days | Medium |
+| Long-term | 10-12 | 10-15 days | Medium-High |
+
+---
+
 ## Executive Summary
 
 Pi has a **three-layer message transformation pipeline** that could serve as foundation for explicit context management and a persistent conversation graph. The session system already implements a tree structure with branching. To achieve full determinism, additional metadata (seed, temperature, hardware quirks) would need to be captured.
@@ -997,4 +1150,116 @@ ProviderFormat[]
 3. **Filtering** - Show only specific roles, tools, time range
 4. **Analytics** - Charts for token usage, response times
 5. **Replay Mode** - Step through conversation turn by turn
+
+---
+
+## Progress Tracking
+
+### Current Status
+
+```
+Phase: NOT STARTED
+Next Action: [1] Build session parser utility
+Blockers: None
+```
+
+### Checklist
+
+#### Immediate (Proof of Concept)
+
+- [ ] **[1] Session Parser Utility**
+  - [ ] Create `SessionGraph` class
+  - [ ] Parse JSONL format
+  - [ ] Build parent/child relationships
+  - [ ] Add navigation methods (getBranch, getChildren, getPath)
+  - [ ] Unit tests
+
+- [ ] **[2] Read-only Visualizer Prototype**
+  - [ ] Tree view component
+  - [ ] Entry metadata display
+  - [ ] Basic layer comparison
+  - [ ] CLI or simple TUI interface
+
+- [ ] **[3] Provider Payload Capture**
+  - [ ] Hook into `onPayload` callback
+  - [ ] Design storage format (separate file? parallel structure?)
+  - [ ] Implement capture logic
+  - [ ] Test with multiple providers
+
+#### Short-term (Minor Enhancements)
+
+- [ ] **[4] Layer Transformation Visualization**
+  - [ ] Show `convertToLlm()` output
+  - [ ] Show `transformMessages()` output
+  - [ ] Diff highlighting
+
+- [ ] **[5] Branch Visualization**
+  - [ ] Tree render component
+  - [ ] Branch navigation UI
+  - [ ] Current branch highlighting
+
+- [ ] **[6] Context Reconstruction Tool**
+  - [ ] `ContextInspector` class
+  - [ ] Reconstruct from any entry ID
+  - [ ] Display full Context
+
+#### Medium-term (Core Metadata)
+
+- [ ] **[7] Reproducibility Metadata**
+  - [ ] Extend `AssistantMessage` type
+  - [ ] Add `reproducibility` field
+  - [ ] Update serialization
+
+- [ ] **[8] Seed Pass-through**
+  - [ ] Add `seed` to `StreamOptions`
+  - [ ] Provider implementations (OpenAI, Anthropic, etc.)
+  - [ ] Storage in message
+
+- [ ] **[9] Request Hash**
+  - [ ] Hash function for payloads
+  - [ ] Storage alongside messages
+  - [ ] Verification utility
+
+#### Long-term (Conversation Graph)
+
+- [ ] **[10] ConversationGraph API Design**
+  - [ ] Interface specification
+  - [ ] Operation semantics
+  - [ ] Documentation
+
+- [ ] **[11] Graph Manipulation**
+  - [ ] Branch operation
+  - [ ] Merge operation
+  - [ ] Delete operation
+
+- [ ] **[12] Replay Engine**
+  - [ ] Context reconstruction
+  - [ ] Payload rebuilding
+  - [ ] Divergence detection
+
+---
+
+## Notes
+
+### Open Questions
+
+1. Should payloads be stored in the session file or separately?
+   - Pro session: atomic, portable
+   - Pro separate: smaller session files, optional
+
+2. How to handle provider version changes?
+   - Store provider version string?
+   - Hash of provider code?
+
+3. What's the granularity of "deterministic"?
+   - Exact token sequence (requires seed + hardware)
+   - Same high-level behavior (seed sufficient)
+   - Same context construction (already achieved)
+
+### Technical Debt / Considerations
+
+- [ ] Memory usage for large sessions (1000+ entries)
+- [ ] Performance of context reconstruction
+- [ ] Serialization format versioning
+- [ ] Provider-specific quirks documentation
 ```
