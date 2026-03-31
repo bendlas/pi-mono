@@ -17,6 +17,7 @@ import type {
 } from "@mariozechner/pi-agent-core";
 import type {
 	Api,
+	AssistantMessage,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
 	Context,
@@ -26,6 +27,7 @@ import type {
 	OAuthLoginCallbacks,
 	SimpleStreamOptions,
 	TextContent,
+	ThinkingContent,
 	ToolResultMessage,
 } from "@mariozechner/pi-ai";
 import type {
@@ -1173,6 +1175,16 @@ export interface ExtensionAPI {
 		options?: { deliverAs?: "steer" | "followUp" },
 	): void;
 
+	/**
+	 * Send a synthetic assistant message to the session.
+	 * Creates a visible assistant message in the conversation history.
+	 * Useful for extensions that need to inject reasoning or context as if the assistant said it.
+	 */
+	sendAssistantMessage(
+		content: string | (TextContent | ThinkingContent)[],
+		options?: { deliverAs?: "steer" | "followUp" | "nextTurn" },
+	): void;
+
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
 
@@ -1392,6 +1404,11 @@ export type SendUserMessageHandler = (
 	options?: { deliverAs?: "steer" | "followUp" },
 ) => void;
 
+export type SendAssistantMessageHandler = (
+	content: string | (TextContent | ThinkingContent)[],
+	options?: { thinking?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+) => void;
+
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
 
 export type SetSessionNameHandler = (name: string) => void;
@@ -1450,6 +1467,7 @@ export interface ExtensionRuntimeState {
 export interface ExtensionActions {
 	sendMessage: SendMessageHandler;
 	sendUserMessage: SendUserMessageHandler;
+	sendAssistantMessage: SendAssistantMessageHandler;
 	appendEntry: AppendEntryHandler;
 	setSessionName: SetSessionNameHandler;
 	getSessionName: GetSessionNameHandler;
