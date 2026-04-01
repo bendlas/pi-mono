@@ -1,4 +1,5 @@
 import {
+	type AssistantMessage,
 	type ImageContent,
 	type Message,
 	type Model,
@@ -319,7 +320,7 @@ export class Agent {
 		await this.runPromptMessages(messages);
 	}
 
-	/** Continue from the current transcript. The last message must be a user or tool-result message. */
+	/** Continue from the current transcript. The last message must be a user, tool-result, or incomplete assistant message. */
 	async continue(): Promise<void> {
 		if (this.activeRun) {
 			throw new Error("Agent is already processing. Wait for completion before continuing.");
@@ -343,7 +344,10 @@ export class Agent {
 				return;
 			}
 
-			throw new Error("Cannot continue from message role: assistant");
+			// Allow continuation from incomplete assistant messages
+			if (!(lastMessage as AssistantMessage).incomplete) {
+				throw new Error("Cannot continue from message role: assistant (unless marked incomplete)");
+			}
 		}
 
 		await this.runContinuation();

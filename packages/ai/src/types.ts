@@ -60,6 +60,7 @@ export type Transport = "sse" | "websocket" | "auto";
 export interface StreamOptions {
 	temperature?: number;
 	maxTokens?: number;
+	seed?: number;
 	signal?: AbortSignal;
 	apiKey?: string;
 	/**
@@ -181,6 +182,13 @@ export interface Usage {
 
 export type StopReason = "stop" | "length" | "toolUse" | "error" | "aborted";
 
+export interface ReproducibilityMetadata {
+	seed?: number;
+	temperature?: number;
+	topP?: number;
+	requestHash?: string; // Hash of full request payload
+}
+
 export interface UserMessage {
 	role: "user";
 	content: string | (TextContent | ImageContent)[];
@@ -198,6 +206,9 @@ export interface AssistantMessage {
 	stopReason: StopReason;
 	errorMessage?: string;
 	timestamp: number; // Unix timestamp in milliseconds
+	reproducibility?: ReproducibilityMetadata;
+	/** When true, indicates this is an incomplete message that the agent should continue from. */
+	incomplete?: boolean;
 }
 
 export interface ToolResultMessage<TDetails = any> {

@@ -1116,7 +1116,7 @@ export interface ExtensionAPI {
 	 */
 	sendAssistantMessage(
 		content: string | (TextContent | ThinkingContent)[],
-		options?: { deliverAs?: "steer" | "followUp" | "nextTurn" },
+		options?: { thinking?: boolean; incomplete?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 	): void;
 
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
@@ -1340,7 +1340,7 @@ export type SendUserMessageHandler = (
 
 export type SendAssistantMessageHandler = (
 	content: string | (TextContent | ThinkingContent)[],
-	options?: { thinking?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+	options?: { thinking?: boolean; incomplete?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 ) => void;
 
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;

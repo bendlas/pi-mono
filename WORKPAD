@@ -1,0 +1,393 @@
+# WORKPAD: Pi Context Management & Extension Features
+
+**Last Updated**: 2024-01-15
+**Status**: PLANNING COMPLETE, READY FOR IMPLEMENTATION
+
+---
+
+## Quick Context Restoration
+
+### What We're Building
+
+1. **Message Structure Visualizer** - Extension to inspect the complete message transformation pipeline
+2. **Conversation Graph System** - Foundation for explicit context management and deterministic replay
+3. **Incomplete Assistant Messages** - Enable extensions to inject reasoning that the agent continues from
+
+### Key Architecture Insight
+
+Pi has a **three-layer message transformation pipeline**:
+
+```
+Session (JSONL tree) → AgentMessage[] → Message[] → Provider Format
+     │                      │              │              │
+     └─ buildSessionContext ─┘              │              │
+                            └─ convertToLlm ─┘              │
+                                              └─ transformMessages ─┘
+```
+
+Sessions are already tree-structured (id/parentId). The pipeline is well-factored with clear hooks. This makes both visualization and context management achievable without major architectural changes.
+
+---
+
+## Prioritized Action Plan
+
+### Immediate Priority: Incomplete Assistant Messages
+
+**Why first**: Enables `/sh -i` feature, small scope, validates extension capabilities.
+
+| Step | Task | File | Effort |
+|------|------|------|--------|
+| 1.1 | Add `incomplete?: boolean` to `AssistantMessage` | `packages/ai/src/types.ts` | 5 min |
+| 1.2 | Modify `agentLoopContinue` validation | `packages/agent/src/agent-loop.ts:64-66` | 15 min |
+| 1.3 | Update `Agent.continue()` method | `packages/agent/src/agent.ts:330-350` | 15 min |
+| 1.4 | Add `incomplete` option to `sendAssistantMessage` | `packages/coding-agent/src/core/agent-session.ts` | 20 min |
+| 1.5 | Implement `/sh -i` using incomplete messages | `/sh` extension | 30 min |
+| 1.6 | Add visual indicator for incomplete messages | UI component | 15 min |
+
+**Total**: ~1.5 hours
+
+**Key change in agent-loop.ts**:
+```typescript
+// Before:
+if (context.messages[context.messages.length - 1].role === "assistant") {
+    throw new Error("Cannot continue from message role: assistant");
+}
+
+// After:
+const lastMessage = context.messages[context.messages.length - 1];
+if (lastMessage.role === "assistant" && !(lastMessage as AssistantMessage).incomplete) {
+    throw new Error("Cannot continue from message role: assistant (unless marked incomplete)");
+}
+```
+
+---
+
+### Second Priority: Session Parser & Visualizer
+
+**Why next**: Foundation for all context management work, provides immediate debugging value.
+
+| Step | Task | Deliverable |
+|------|------|-------------|
+| 2.1 | Build `SessionGraph` class | Parse JSONL → in-memory graph with navigation |
+| 2.2 | Tree view component | Hierarchical entry display with metadata |
+| 2.3 | Layer comparison view | Show transformation at each pipeline stage |
+| 2.4 | Provider payload capture | Hook `onPayload` to store full request trace |
+
+**Effort**: 2-3 days
+
+---
+
+### Third Priority: Reproducibility Metadata
+
+**Why later**: Requires core type changes, but enables deterministic replay.
+
+| Step | Task | Impact |
+|------|------|--------|
+| 3.1 | Add `reproducibility` field to `AssistantMessage` | Store seed, temperature, topP |
+| 3.2 | Pass seed through `StreamOptions` | Providers that support seeds |
+| 3.3 | Hash request payloads | Fingerprint for replay verification |
+
+**Effort**: 1 day
+
+---
+
+### Long-term: Conversation Graph System
+
+| Phase | Deliverable |
+|-------|-------------|
+| 4.1 | `ConversationGraph` API design |
+| 4.2 | Graph manipulation (branch, merge, delete) |
+| 4.3 | `ReplayEngine` for deterministic replay |
+
+**Effort**: 10-15 days
+
+---
+
+## Architecture Reference
+
+### Message Types Hierarchy
+
+```typescript
+// Core types (pi-ai)
+interface UserMessage {
+  role: "user";
+  content: string | (TextContent | ImageContent)[];
+  timestamp: number;
+}
+
+interface AssistantMessage {
+  role: "assistant";
+  content: (TextContent | ThinkingContent | ToolCall)[];
+  api: Api;              // "anthropic-messages", "openai-chat", etc.
+  provider: Provider;    // "anthropic", "openai", etc.
+  model: string;         // "claude-sonnet-4-20250514"
+  responseId?: string;   // Provider response ID
+  usage: Usage;
+  stopReason: StopReason;
+  errorMessage?: string;
+  timestamp: number;
+  incomplete?: boolean;  // NEW: for continuation feature
+}
+
+// Extended types (coding-agent)
+interface BashExecutionMessage {
+  role: "bashExecution";
+  command: string;
+  output: string;
+  exitCode: number | undefined;
+  excludeFromContext?: boolean;  // !! prefix
+  // ...
+}
+
+interface CustomMessage {
+  role: "custom";
+  customType: string;    // Extension identifier
+  content: string | (TextContent | ImageContent)[];
+  display: boolean;
+  details?: any;         // NOT sent to LLM
+  // ...
+}
+```
+
+### Session Entry Types
+
+```typescript
+type SessionEntry =
+  | SessionMessageEntry      // AgentMessage with id/parentId
+  | ModelChangeEntry         // provider, modelId
+  | ThinkingLevelChangeEntry // thinkingLevel
+  | CompactionEntry          // summary, firstKeptEntryId
+  | BranchSummaryEntry       // fromId, summary
+  | CustomEntry              // Extension state (NOT in LLM context)
+  | CustomMessageEntry       // Extension message (IN LLM context)
+  | LabelEntry               // User bookmarks
+```
+
+### Transformation Pipeline
+
+```typescript
+// 1. Session → AgentMessage[]
+const { messages } = sessionManager.buildSessionContext(entries, leafId);
+
+// 2. AgentMessage[] → Message[]
+const llmMessages = convertToLlm(messages);
+  // Handles: bashExecution → user, custom → user, branchSummary → user, etc.
+
+// 3. Message[] → Message[] (cross-provider)
+const normalized = transformMessages(llmMessages, model);
+  // Handles: thinking blocks, tool call ID normalization, orphaned tool calls
+
+// 4. Message[] → Provider format (inside provider)
+const request = convertToProviderFormat(normalized, model, tools);
+```
+
+### Key Source Files
+
+| Component | File |
+|-----------|------|
+| Core types | `packages/ai/src/types.ts` |
+| Cross-provider transform | `packages/ai/src/providers/transform-messages.ts` |
+| Agent loop | `packages/agent/src/agent-loop.ts` |
+| Agent state | `packages/agent/src/agent.ts` |
+| Extended types | `packages/coding-agent/src/core/messages.ts` |
+| Session manager | `packages/coding-agent/src/core/session-manager.ts` |
+| Session format docs | `packages/coding-agent/docs/session.md` |
+
+---
+
+## Incomplete Messages: Full Plan
+
+### Goal
+
+Enable extensions to inject an "incomplete" assistant message that the agent will naturally continue from.
+
+### Use Case
+
+```
+User: /sh -i ls -la
+    ↓
+Extension injects: AssistantMessage "I need to check the files..." (incomplete: true)
+    ↓
+Agent continues: "...in this directory. [executes bash tool] [reports results]"
+```
+
+### Implementation Details
+
+#### Phase 1: Type Definition
+
+```typescript
+// packages/ai/src/types.ts
+export interface AssistantMessage {
+    // ... existing fields
+    incomplete?: boolean;  // If true, agent should continue from this message
+}
+```
+
+#### Phase 2: Agent Loop
+
+```typescript
+// packages/agent/src/agent-loop.ts
+
+// In runLoop, after streaming response:
+if (message.incomplete) {
+    // Emit turn_end but NOT agent_end
+    await emit({ type: "turn_end", message, toolResults: [] });
+    continue;  // Continue outer loop for next response
+}
+```
+
+#### Phase 3: AgentSession API
+
+```typescript
+// packages/coding-agent/src/core/agent-session.ts
+
+async sendAssistantMessage(
+    content: string | (TextContent | ThinkingContent)[],
+    options?: {
+        thinking?: boolean;
+        deliverAs?: "steer" | "followUp" | "nextTurn";
+        incomplete?: boolean;  // NEW
+    }
+): Promise<void> {
+    const assistantMessage: AssistantMessage = {
+        // ...
+        incomplete: options?.incomplete,
+    };
+
+    this.agent.state.messages.push(assistantMessage);
+
+    // If incomplete and agent idle, trigger continuation
+    if (options?.incomplete && !this.isStreaming) {
+        await this.agent.continue();
+    }
+}
+```
+
+### Open Questions
+
+1. **Streaming UI**: Show incomplete with "..." animation, then append streamed content?
+2. **Message attribution**: Track injected vs generated parts in `details` field?
+3. **stopReason**: Use `"stop"` with `incomplete: true`, or add `"incomplete"` to StopReason type?
+
+### Success Criteria
+
+- [ ] `/sh -i ls -la` injects reasoning as incomplete assistant message
+- [ ] Agent continues naturally without error
+- [ ] Continuation appears seamless in UI
+- [ ] Backward compatible - existing code unaffected
+
+---
+
+## Message Visualizer: Full Plan
+
+### Extension Structure
+
+```
+packages/coding-agent/extensions/message-visualizer/
+├── extension.ts              # Entry point, registers commands
+├── visualizer.ts             # Core visualization logic
+├── components/
+│   ├── tree-view.ts          # Hierarchical view
+│   ├── list-view.ts          # Flat list view
+│   ├── json-view.ts          # Raw JSON view
+│   ├── layer-comparison.ts   # Side-by-side comparison
+│   └── metadata-panel.ts     # Detail panels
+├── types.ts
+└── SKILL.md
+```
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `message-visualizer:open` | Open visualizer for current session |
+| `message-visualizer:entry` | View specific entry by ID |
+| `message-visualizer:compare` | Compare layers for selected message |
+| `message-visualizer:export` | Export session as JSON |
+
+### Key APIs
+
+```typescript
+// Access session
+const entries = context.sessionManager.loadSession(sessionId);
+
+// Transformation functions
+import { convertToLlm } from "@mariozechner/pi-coding-agent";
+import { transformMessages } from "@mariozechner/pi-ai/providers";
+
+// Live updates
+context.agent.subscribe((event) => {
+  if (event.type === "message_end") visualizer.refresh();
+});
+
+// Payload capture
+context.sdk.onPayload = (payload, model) => {
+  visualizer.capturePayload(payload, model);
+};
+```
+
+---
+
+## Progress Checklist
+
+### Incomplete Messages Feature
+
+- [ ] Add `incomplete` field to `AssistantMessage` type
+- [ ] Modify agent-loop.ts validation
+- [ ] Update Agent.continue() method
+- [ ] Add incomplete option to sendAssistantMessage
+- [ ] Implement `/sh -i` flag
+- [ ] Add UI indicator for incomplete messages
+- [ ] Unit tests
+- [ ] Integration tests
+
+### Session Parser & Visualizer
+
+- [ ] Create `SessionGraph` class
+- [ ] Parse JSONL format
+- [ ] Build parent/child relationships
+- [ ] Navigation methods (getBranch, getChildren, getPath)
+- [ ] Tree view component
+- [ ] Layer comparison view
+- [ ] Provider payload capture hook
+
+### Reproducibility Metadata
+
+- [ ] Add `reproducibility` field to `AssistantMessage`
+- [ ] Add `seed` to `StreamOptions`
+- [ ] Provider implementations for seed
+- [ ] Request payload hashing
+
+---
+
+## Notes
+
+### What's Already Captured (Determinism)
+
+| Data | Where | Reproducible? |
+|------|-------|---------------|
+| Message history | SessionEntry.message | ✅ |
+| Model ID | AssistantMessage.model | ✅ |
+| Provider | AssistantMessage.provider | ✅ |
+| API type | AssistantMessage.api | ✅ |
+| Timestamp | AssistantMessage.timestamp | ✅ |
+| Usage stats | AssistantMessage.usage | ✅ |
+| Response ID | AssistantMessage.responseId | ⚠️ Provider-specific |
+| Thinking signatures | ThinkingContent.thinkingSignature | ⚠️ Provider-specific |
+
+### What's Missing
+
+| Data | Why Needed |
+|------|-----------|
+| Seed | Reproducible sampling |
+| Temperature | Sampling variance |
+| Top_p | Other sampling params |
+| Hardware/driver | GPU non-determinism |
+| Model weights hash | Model version tracking |
+
+### Technical Considerations
+
+- Memory usage for large sessions (1000+ entries)
+- Performance of context reconstruction
+- Serialization format versioning
+- Provider-specific quirks documentation

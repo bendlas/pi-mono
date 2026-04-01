@@ -393,6 +393,10 @@ function buildParams(model: Model<"openai-completions">, context: Context, optio
 		params.temperature = options.temperature;
 	}
 
+	if (options?.seed !== undefined) {
+		params.seed = options.seed;
+	}
+
 	if (context.tools) {
 		params.tools = convertTools(context.tools, compat);
 		if (compat.zaiToolStream) {

@@ -1314,10 +1314,11 @@ export class AgentSession {
 	 *
 	 * @param content Assistant message content (string, text blocks, or text+thinking blocks)
 	 * @param options.thinking If true, content is wrapped as hidden thinking (requires thinking-capable model)
+	 * @param options.incomplete If true, marks the message as incomplete, allowing the agent to continue from it
 	 */
 	async sendAssistantMessage(
 		content: string | (TextContent | ThinkingContent)[],
-		options?: { thinking?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+		options?: { thinking?: boolean; incomplete?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 	): Promise<void> {
 		// Normalize content to blocks array
 		let blocks: (TextContent | ThinkingContent)[];
@@ -1345,6 +1346,11 @@ export class AgentSession {
 			stopReason: "stop",
 			timestamp: Date.now(),
 		};
+
+		// Mark as incomplete if specified
+		if (options?.incomplete) {
+			assistantMessage.incomplete = true;
+		}
 
 		// Append to agent state and session
 		this.agent.state.messages.push(assistantMessage);

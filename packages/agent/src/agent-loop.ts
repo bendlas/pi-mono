@@ -71,8 +71,9 @@ export function agentLoopContinue(
 		throw new Error("Cannot continue: no messages in context");
 	}
 
-	if (context.messages[context.messages.length - 1].role === "assistant") {
-		throw new Error("Cannot continue from message role: assistant");
+	const lastMessage = context.messages[context.messages.length - 1];
+	if (lastMessage.role === "assistant" && !(lastMessage as AssistantMessage).incomplete) {
+		throw new Error("Cannot continue from message role: assistant (unless marked incomplete)");
 	}
 
 	const stream = createAgentStream();
@@ -128,8 +129,9 @@ export async function runAgentLoopContinue(
 		throw new Error("Cannot continue: no messages in context");
 	}
 
-	if (context.messages[context.messages.length - 1].role === "assistant") {
-		throw new Error("Cannot continue from message role: assistant");
+	const lastMessage = context.messages[context.messages.length - 1];
+	if (lastMessage.role === "assistant" && !(lastMessage as AssistantMessage).incomplete) {
+		throw new Error("Cannot continue from message role: assistant (unless marked incomplete)");
 	}
 
 	const newMessages: AgentMessage[] = [];
