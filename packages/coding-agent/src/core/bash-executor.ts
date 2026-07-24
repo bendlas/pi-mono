@@ -11,7 +11,7 @@ import { splitIncompleteAnsiSuffix, stripAnsi } from "../utils/ansi.ts";
 import { createOutputFileStream } from "../utils/output-files.ts";
 import { sanitizeBinaryOutput } from "../utils/shell.ts";
 import type { BashOperations } from "./tools/bash.ts";
-import { DEFAULT_MAX_BYTES, truncateTail } from "./tools/truncate.ts";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateTail } from "./tools/truncate.ts";
 
 // ============================================================================
 // Types
@@ -22,6 +22,10 @@ export interface BashExecutorOptions {
 	onChunk?: (chunk: string) => void;
 	/** AbortSignal for cancellation */
 	signal?: AbortSignal;
+	/** Maximum lines of output before truncation (default: 2000) */
+	maxLines?: number;
+	/** Maximum bytes of output before truncation (default: 50KB) */
+	maxBytes?: number;
 }
 
 export interface BashResult {
@@ -51,9 +55,12 @@ export async function executeBashWithOperations(
 	operations: BashOperations,
 	options?: BashExecutorOptions,
 ): Promise<BashResult> {
+	const maxLines = options?.maxLines ?? DEFAULT_MAX_LINES;
+	const maxBytes = options?.maxBytes ?? DEFAULT_MAX_BYTES;
+	const maxOutputBytes = maxBytes * 2;
+
 	const outputChunks: string[] = [];
 	let outputBytes = 0;
-	const maxOutputBytes = DEFAULT_MAX_BYTES * 2;
 
 	let tempFilePath: string | undefined;
 	let tempFileStream: WriteStream | undefined;
@@ -81,7 +88,7 @@ export async function executeBashWithOperations(
 		}
 
 		// Start writing to temp file if exceeds threshold
-		if (totalBytes > DEFAULT_MAX_BYTES) {
+		if (totalBytes > maxBytes) {
 			ensureTempFile();
 		}
 
@@ -129,7 +136,7 @@ export async function executeBashWithOperations(
 
 	flushOutput();
 	const fullOutput = outputChunks.join("");
-	const truncationResult = truncateTail(fullOutput);
+	const truncationResult = truncateTail(fullOutput, { maxLines, maxBytes });
 	if (truncationResult.truncated) {
 		ensureTempFile();
 	}
