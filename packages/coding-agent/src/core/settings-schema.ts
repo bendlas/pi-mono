@@ -2,7 +2,7 @@ import { ModelThinkingLevelSchema } from "@earendil-works/pi-ai/providers/model-
 import { type Static, type TSchemaOptions, Type } from "typebox";
 import { SETTINGS_DEFAULTS } from "./settings-defaults.ts";
 
-function nonNegativeSafeInteger(options: { default?: number } = {}) {
+function nonNegativeSafeInteger(options: { default?: number } & TSchemaOptions = {}) {
 	return Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER, ...options });
 }
 
@@ -276,6 +276,18 @@ export const SettingsSchema = Type.Object(
 		),
 		shellCommandPrefix: Type.Optional(
 			Type.String({ description: "Prefix prepended to every bash command, for example to enable shell aliases." }),
+		),
+		bashMaxLines: Type.Optional(
+			nonNegativeSafeInteger({
+				description: "Maximum lines of bash tool output before truncation.",
+				default: SETTINGS_DEFAULTS.bashMaxLines,
+			}),
+		),
+		bashMaxBytes: Type.Optional(
+			nonNegativeSafeInteger({
+				description: "Maximum bytes of bash tool output before truncation.",
+				default: SETTINGS_DEFAULTS.bashMaxBytes,
+			}),
 		),
 		npmCommand: Type.Optional(
 			Type.Array(Type.String(), {

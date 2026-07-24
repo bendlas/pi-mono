@@ -1038,6 +1038,34 @@ export class SettingsManager {
 		this.save();
 	}
 
+	getBashMaxLines(): number {
+		const value = this.settings.bashMaxLines;
+		return typeof value === "number" && Number.isFinite(value) && value >= 1 ? value : SETTINGS_DEFAULTS.bashMaxLines;
+	}
+
+	setBashMaxLines(lines: number): void {
+		if (!Number.isFinite(lines) || lines < 1) {
+			throw new Error("bashMaxLines must be a finite number >= 1");
+		}
+		this.globalSettings.bashMaxLines = lines;
+		this.markModified("bashMaxLines");
+		this.save();
+	}
+
+	getBashMaxBytes(): number {
+		const value = this.settings.bashMaxBytes;
+		return typeof value === "number" && Number.isFinite(value) && value >= 1 ? value : SETTINGS_DEFAULTS.bashMaxBytes;
+	}
+
+	setBashMaxBytes(bytes: number): void {
+		if (!Number.isFinite(bytes) || bytes < 1) {
+			throw new Error("bashMaxBytes must be a finite number >= 1");
+		}
+		this.globalSettings.bashMaxBytes = bytes;
+		this.markModified("bashMaxBytes");
+		this.save();
+	}
+
 	getNpmCommand(): string[] | undefined {
 		return this.settings.npmCommand ? [...this.settings.npmCommand] : undefined;
 	}
