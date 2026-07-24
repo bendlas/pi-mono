@@ -139,6 +139,8 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are requir
 | `shellPath` | string | Platform default | Custom shell executable path. Supports a leading `~`. |
 | `shellCommandPrefix` | string | None | Prefix prepended to every shell command. |
 | `npmCommand` | `string[]` | `npm` | Command and arguments used for npm package lookup and installation. |
+| `bashMaxLines` | number | `2000` | Maximum number of output lines the built-in `bash` tool keeps before truncating. |
+| `bashMaxBytes` | number | `51200` (50KB) | Maximum number of output bytes the built-in `bash` tool keeps before truncating. |
 
 See [Shell aliases](shell-aliases.md) for shell setup and [Pi Packages](packages.md) for package-manager behavior.
 
