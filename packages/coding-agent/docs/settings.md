@@ -143,6 +143,8 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are requir
 | `shellCommandPrefix` | string | None | Prefix prepended to every shell command. |
 | `npmCommand` | `string[]` | `npm` | Command and arguments used for npm package lookup and installation. |
 | `selfUpdateCommand` | `string[]` | None | Command and arguments `pi update` runs to update Pi itself, with `{packageName}`, `{version}`, and `{installSpec}` placeholders. `PI_SELF_UPDATE_COMMAND` takes precedence. **Can only be set in agent-directory settings.** See [Custom update command](cli.md#custom-update-command). |
+| `bashMaxLines` | number | `2000` | Maximum number of output lines the built-in `bash` tool keeps before truncating. |
+| `bashMaxBytes` | number | `51200` (50KB) | Maximum number of output bytes the built-in `bash` tool keeps before truncating. |
 
 See [Shell aliases](shell-aliases.md) for shell setup and [Pi Packages](packages.md) for package-manager behavior.
 
