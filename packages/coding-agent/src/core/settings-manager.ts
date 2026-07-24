@@ -99,6 +99,8 @@ export interface Settings {
 	quietStartup?: boolean;
 	defaultProjectTrust?: DefaultProjectTrust; // default: "ask"; global setting only
 	shellCommandPrefix?: string; // Prefix prepended to every bash command (e.g., "shopt -s expand_aliases" for alias support)
+	bashMaxLines?: number; // Maximum lines of bash tool output before truncation (default: 2000)
+	bashMaxBytes?: number; // Maximum bytes of bash tool output before truncation (default: 51200)
 	npmCommand?: string[]; // Command used for npm package lookup/install operations, argv-style (e.g., ["mise", "exec", "node@20", "--", "npm"])
 	collapseChangelog?: boolean; // Show condensed changelog after update (use /changelog for full)
 	enableInstallTelemetry?: boolean; // default: true - anonymous version/update ping after changelog-detected updates
@@ -914,6 +916,34 @@ export class SettingsManager {
 	setShellCommandPrefix(prefix: string | undefined): void {
 		this.globalSettings.shellCommandPrefix = prefix;
 		this.markModified("shellCommandPrefix");
+		this.save();
+	}
+
+	getBashMaxLines(): number {
+		const value = this.settings.bashMaxLines;
+		return typeof value === "number" && Number.isFinite(value) && value >= 1 ? value : 2000;
+	}
+
+	setBashMaxLines(lines: number): void {
+		if (!Number.isFinite(lines) || lines < 1) {
+			throw new Error("bashMaxLines must be a finite number >= 1");
+		}
+		this.globalSettings.bashMaxLines = lines;
+		this.markModified("bashMaxLines");
+		this.save();
+	}
+
+	getBashMaxBytes(): number {
+		const value = this.settings.bashMaxBytes;
+		return typeof value === "number" && Number.isFinite(value) && value >= 1 ? value : 50 * 1024;
+	}
+
+	setBashMaxBytes(bytes: number): void {
+		if (!Number.isFinite(bytes) || bytes < 1) {
+			throw new Error("bashMaxBytes must be a finite number >= 1");
+		}
+		this.globalSettings.bashMaxBytes = bytes;
+		this.markModified("bashMaxBytes");
 		this.save();
 	}
 
