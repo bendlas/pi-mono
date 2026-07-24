@@ -2557,6 +2557,8 @@ export class AgentSession {
 		const autoResizeImages = this.settingsManager.getImageAutoResize();
 		const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
 		const shellPath = this.settingsManager.getShellPath();
+		const bashMaxLines = this.settingsManager.getBashMaxLines();
+		const bashMaxBytes = this.settingsManager.getBashMaxBytes();
 		const baseToolDefinitions = this._baseToolsOverride
 			? Object.fromEntries(
 					Object.entries(this._baseToolsOverride).map(([name, tool]) => [
@@ -2566,7 +2568,7 @@ export class AgentSession {
 				)
 			: createAllToolDefinitions(this._cwd, {
 					read: { autoResizeImages },
-					bash: { commandPrefix: shellCommandPrefix, shellPath },
+					bash: { commandPrefix: shellCommandPrefix, shellPath, maxLines: bashMaxLines, maxBytes: bashMaxBytes },
 				});
 
 		this._baseToolDefinitions = new Map(
@@ -2777,6 +2779,8 @@ export class AgentSession {
 		// Apply command prefix if configured (e.g., "shopt -s expand_aliases" for alias support)
 		const prefix = this.settingsManager.getShellCommandPrefix();
 		const shellPath = this.settingsManager.getShellPath();
+		const bashMaxLines = this.settingsManager.getBashMaxLines();
+		const bashMaxBytes = this.settingsManager.getBashMaxBytes();
 		const resolvedCommand = prefix ? `${prefix}\n${command}` : command;
 
 		try {
@@ -2790,6 +2794,8 @@ export class AgentSession {
 						this._emit({ type: "bash_execution_update", id: options?.id, delta });
 					},
 					signal: abortController.signal,
+					maxLines: bashMaxLines,
+					maxBytes: bashMaxBytes,
 				},
 			);
 
