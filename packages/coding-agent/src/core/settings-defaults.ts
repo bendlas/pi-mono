@@ -24,6 +24,8 @@ export const SETTINGS_DEFAULTS = {
 			maxRetryDelayMs: 60000,
 		},
 	},
+	bashMaxLines: 2000,
+	bashMaxBytes: 51200,
 	hideThinkingBlock: false,
 	showCacheMissNotices: false,
 	quietStartup: false,
